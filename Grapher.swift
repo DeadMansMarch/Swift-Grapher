@@ -1,124 +1,156 @@
 
+enum REQUEST_ERROR{
+    case NORP,EMPTY,SPEC;
+}
 
-class Grapher : CustomStringConvertible{
-    private(set) var tid:String = "";
-    private(set) var lid:Int?   = nil;
+func webrequest(_ url:String,_ querydata:[String:String])->String?{
+    var request_end = false;
+    var request_error:REQUEST_ERROR? = nil;
+    var spec_error = "";
+    
+    var request_response = "";
+    
+    let querystring = querydata.reduce("",{$0 + "\($1.0)=\($1.1)&"});
+    
+    var request = URLRequest(url: URL(string: url)!);
+    request.httpMethod = "post"
+    request.httpBody = querystring.data(using: String.Encoding.utf8);
+    
+    let task = URLSession.shared.dataTask(with: request) { data, response, error in
+        guard error == nil else {
+            request_error = .SPEC;
+            spec_error = error!.localizedDescription
+            return
+        }
+        guard let data = data else {
+            request_error = .EMPTY;
+            return
+        }
+        
+        request_response = String(data: data, encoding: String.Encoding.utf8)!;
+        request_end = true;
+    }
+    
+    task.resume()
+    var tick = 0;
+    while !request_end{
+        
+        guard request_error == nil else{
+            print("REQUEST ERROR");
+            print(spec_error);
+            return nil;
+        }
+        
+        usleep(10000);
+        tick += 1;
+        guard tick < 100 else{
+            print("Slow response from server... aborting.");
+            return nil
+        }
+        
+        
+    }
+    
+    return request_response;
+}
+
+struct Graph: CustomStringConvertible{
+    
+    static let mainserver = "http://mainhopper.hopto.org:8888/AS1/ugraph.php";
     
     enum GraphType : String{
         case Line = "line",Pie = "pie";
     }
+
     
-    enum LabelType {
-        case Axis, Data
+    private let tid:String;
+    private let  id:Int;
+    
+    init?(header:String,type:GraphType,apiHash:String=""){
+        let initRaw = webrequest(Graph.mainserver,[
+            "reactor":"init",
+            "name":header,
+            "type":type.rawValue,
+            "apik":apiHash
+        ]);
+        
+        guard let initData = initRaw else{
+            print("Error initializing graph.");
+            return nil;
+        }
+        
+        let response = initData.characters.split(separator:":").map({String($0)});
+        guard response.count > 1 else{
+            print("Graph initialization limit reached. Delete old graphs or wait to continue.");
+            return nil;
+        }
+        self.tid = response[0];
+        self.id  = Int(response[1])!;
     }
     
-    static func Request(_ url:String,_ requestBody:String)->String{
-        var final = false;
-        var resp  = "";
+    func axis_headers(y:String,x:String)->Bool{
+        let success = webrequest(Graph.mainserver,[
+            "reactor":"name_axis",
+            "names":"\(x)|\(y)",
+            "id":"\(self.id)",
+            "tid":self.tid
+        ]);
         
-        var request = URLRequest(url: URL(string: url)!);
-        request.httpMethod = "post"
-        request.httpBody = requestBody.data(using: String.Encoding.utf8);
-        
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-            guard error == nil else {
-                print(error!)
-                return
-            }
-            guard let data = data else {
-                print("Data is empty")
-                return
-            }
-            
-            resp = String(data: data, encoding: String.Encoding.utf8)!;
-            final = true;
+        if (success != nil){
+            return true;
         }
-        
-        task.resume()
-        while !final{
-            usleep(100);
-        }
-        return resp;
+        print("Axis headers failed to write.");
+        return false;
     }
     
-    func make(name:String,type:GraphType){
-        var response = Grapher.Request(
-            "http://mainhopper.hopto.org:8888/AS1/ugraph.php",
-            "reactor=init&name=\(name)&type=\(type.rawValue)"
-        );
+    func data_headers(headers:[String])->Bool{
+        let success = webrequest(Graph.mainserver,[
+            "reactor":"name_data",
+            "names":String(headers.reduce("",{$0 + $1 + "|"}).characters.dropLast()),
+            "id":"\(self.id)",
+            "tid":self.tid
+        ]);
         
-        var dual = response.characters.split(separator:":").map({String($0)});
-        
-        guard dual.count > 1 else {
-            print("Too many graphs made - Init failed.");
-            return;
+        if (success != nil){
+            return true;
         }
-        
-        guard let lid = Int(dual[1]) else{
-            print("Unknown Graph Error");
-            return;
-        }
-        
-        self.tid = dual[0];
-        self.lid = lid;
-        
-        print("Graph initialized.");
+        print("Data headers failed to write.");
+        return false;
     }
     
-    func label(_ type: LabelType,labels: [String]){
-        guard let id = self.lid else{
-            print("Graph not initiated.");
-            return;
+    func add_data(x:Any,data:[Any])->Bool{
+        
+        let compress = String(data.reduce("\(x)|",{$0 + String(describing: $1) + "|"}).characters.dropLast());
+        
+        let success = webrequest(Graph.mainserver,[
+            "reactor":"data",
+            "points":compress,
+            "id":"\(id)",
+            "tid":self.tid
+        ]);
+        
+        if (success != nil){
+            return true;
         }
         
-        let Reactor:String;
-        switch(type){
-            case .Axis:
-                Reactor = "name_axis";
-            case .Data:
-                Reactor = "name_data"
-        }
-        
-        let names = String(labels.reduce("",{$0 + $1 + "|"}).characters.dropLast());
-        let _ = Grapher.Request(
-            "http://mainhopper.hopto.org:8888/AS1/ugraph.php",
-            "reactor=\(Reactor)&names=\(names)&id=\(id)&tid=\(self.tid)"
-        )
+        print("Data addition failed.");
+        return false;
     }
     
-    func add_data(data: [Any]){
-        guard let id = self.lid else{
-            print("Graph not initiated.");
-            return;
-        }
-        
-        let compress = String(data.reduce("",{$0 + String(describing: $1) + "|"}).characters.dropLast());
-        let _ = Grapher.Request(
-            "http://mainhopper.hopto.org:8888/AS1/ugraph.php",
-            "reactor=data&points=\(compress)&id=\(id)&tid=\(self.tid)"
-        )
-    }
-    
-    func delete(){
-        guard let id = self.lid else{
-            print("Graph not initiated.");
-            return;
-        }
-        
-        let response = Grapher.Request(
-            "http://mainhopper.hopto.org:8888/AS1/ugraph.php",
-             "reactor=delete&id=\(id)&tid=\(self.tid)"
-        );
-        
-        if (response != ""){
-            print("Error deleting graph.")
-            print(response)
-        }else{
-            print("Graph deleted");
-        }
+    func add_data(x:Any,data:[Any],modifier:(Any,Any)->Any)->Bool{
+        return add_data(x: x, data: data.map({modifier(x,$0)}));
     }
     
     var description: String{
-        return "http://mainhopper.hopto.org:8888/AS1/ugraph.php?reactor=display&id=\(self.lid!)";
+        return "http://mainhopper.hopto.org:8888/AS1/ugraph.php?reactor=display&id=\(self.id)";
     }
+}
+
+extension Graph{
+    
+    init?(header:String,yHeader:String,xHeader:String,apiHash:String=""){
+        self.init(header:header,type:.Line,apiHash:apiHash);
+        self.axis_headers(y: yHeader, x: xHeader);
+    }
+    
 }
